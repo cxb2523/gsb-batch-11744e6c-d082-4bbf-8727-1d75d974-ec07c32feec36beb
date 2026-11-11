@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  server:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-please--') }}
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make apply
+      - run: go fix -diff ./build/... ./server/...
+      - run: go vet ./build/... ./server/...
+      - run: go test -race ./build/... ./server/...
+
+  webapp:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-please--') }}
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26.13.0
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+      - run: make apply
+      - run: cd webapp && npm ci
+      - run: cd webapp && npm run typecheck
+      - run: cd webapp && npm run biome:ci
+      - run: cd webapp && npm run react-doctor
+      - run: cd webapp && npm run test
+      - run: cd webapp && npm run build
+
+  build:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-please--') }}
+    runs-on: ubuntu-26.04
+    needs: [server, webapp]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26.13.0
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+      - run: cd webapp && npm ci
+      - run: make dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugin-bundle
+          path: dist/*.tar.gz

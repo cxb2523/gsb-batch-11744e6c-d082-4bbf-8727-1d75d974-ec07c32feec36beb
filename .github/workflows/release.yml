@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Release tag to build and upload assets for
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-26.04
+    if: ${{ github.event_name == 'push' }}
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build-and-upload:
+    runs-on: ubuntu-26.04
+    needs: release-please
+    if: ${{ always() && ((github.event_name == 'push' && needs.release-please.outputs.release_created == 'true') || github.event_name == 'workflow_dispatch') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.sha }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26.13.0
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+      - name: Load public signing key from the publication revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -H 'Accept: application/vnd.github.raw+json' "repos/$GITHUB_REPOSITORY/contents/assets/signing-key.asc?ref=$GITHUB_SHA" > assets/signing-key.asc
+
+      - name: Import GPG key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+      - name: Verify signing key
+        run: |
+          SIGNING_KEY_FINGERPRINT=$(gpg --show-keys --with-colons assets/signing-key.asc | awk -F: '$1 == "fpr" {print $10; exit}')
+          test -n "$SIGNING_KEY_FINGERPRINT"
+          gpg --batch --list-secret-keys "$SIGNING_KEY_FINGERPRINT" > /dev/null
+          echo "SIGNING_KEY_FINGERPRINT=$SIGNING_KEY_FINGERPRINT" >> "$GITHUB_ENV"
+
+      - run: cd webapp && npm ci
+      - run: make dist
+
+      - name: Sign plugin bundle
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          for f in dist/*.tar.gz; do
+            gpg --batch --yes \
+                --pinentry-mode loopback \
+                --local-user "$SIGNING_KEY_FINGERPRINT" \
+                --passphrase "$GPG_PASSPHRASE" \
+                --personal-digest-preferences SHA256 \
+                --detach-sign "$f"
+          done
+
+      - name: Upload release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || needs.release-please.outputs.tag_name }}
+        run: gh release upload --clobber "$RELEASE_TAG" dist/*.tar.gz dist/*.tar.gz.sig

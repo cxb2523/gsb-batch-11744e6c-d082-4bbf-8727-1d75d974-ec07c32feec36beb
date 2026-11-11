@@ -1,0 +1,151 @@
+import {
+  type ClientTranscriptionModel,
+  type ClientTranscriptionQuantization,
+  clientTranscriptionModelSet,
+  clientTranscriptionQuantizationSet,
+} from "../plugin/manifest";
+import { getSiteBasePath } from "./site_base_path";
+
+export type VoiceMessagesClientConfig = {
+  maxVoiceMessageBytes: number;
+  maxRecordingDurationMs: number;
+  voiceMessagesEnabled: boolean;
+  uploadedAudioPreviewEnabled: boolean;
+  clientTranscriptionEnabled: boolean;
+  clientTranscriptionAutoStart: boolean;
+  clientTranscriptionModel: ClientTranscriptionModel;
+  clientTranscriptionQuantization: ClientTranscriptionQuantization;
+  clientTranscriptionLanguage: string;
+};
+
+type ServerVoiceMessagesClientConfig = {
+  max_voice_message_bytes?: unknown;
+  max_recording_duration_ms?: unknown;
+  voice_messages_enabled?: unknown;
+  uploaded_audio_preview_enabled?: unknown;
+  client_transcription_enabled?: unknown;
+  client_transcription_auto_start?: unknown;
+  client_transcription_model?: unknown;
+  client_transcription_quantization?: unknown;
+  client_transcription_language?: unknown;
+};
+
+export const defaultClientConfig: VoiceMessagesClientConfig = {
+  maxVoiceMessageBytes: 0,
+  maxRecordingDurationMs: 0,
+  voiceMessagesEnabled: true,
+  uploadedAudioPreviewEnabled: true,
+  clientTranscriptionEnabled: false,
+  clientTranscriptionAutoStart: false,
+  clientTranscriptionModel: "whisper-tiny",
+  clientTranscriptionQuantization: "hybrid",
+  clientTranscriptionLanguage: "",
+};
+
+function booleanOrDefault(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function modelOrDefault(value: unknown): ClientTranscriptionModel {
+  if (
+    typeof value === "string" &&
+    clientTranscriptionModelSet.has(value as ClientTranscriptionModel)
+  ) {
+    return value as ClientTranscriptionModel;
+  }
+  return defaultClientConfig.clientTranscriptionModel;
+}
+
+function quantizationOrDefault(
+  value: unknown,
+): ClientTranscriptionQuantization {
+  if (
+    typeof value === "string" &&
+    clientTranscriptionQuantizationSet.has(
+      value as ClientTranscriptionQuantization,
+    )
+  ) {
+    return value as ClientTranscriptionQuantization;
+  }
+  return defaultClientConfig.clientTranscriptionQuantization;
+}
+
+function languageOrDefault(value: unknown): string {
+  return typeof value === "string"
+    ? value.trim()
+    : defaultClientConfig.clientTranscriptionLanguage;
+}
+
+class InvalidRecordingLimitsError extends Error {
+  constructor() {
+    super("Could not load valid recording limits. Try again.");
+  }
+}
+
+function parseLimit(value: unknown, minimum: number): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < minimum
+  ) {
+    throw new InvalidRecordingLimitsError();
+  }
+  return value;
+}
+
+function mapClientConfig(
+  payload: ServerVoiceMessagesClientConfig,
+): VoiceMessagesClientConfig {
+  return {
+    maxVoiceMessageBytes: parseLimit(payload.max_voice_message_bytes, 1),
+    maxRecordingDurationMs: parseLimit(payload.max_recording_duration_ms, 0),
+    voiceMessagesEnabled: booleanOrDefault(
+      payload.voice_messages_enabled,
+      defaultClientConfig.voiceMessagesEnabled,
+    ),
+    uploadedAudioPreviewEnabled: booleanOrDefault(
+      payload.uploaded_audio_preview_enabled,
+      defaultClientConfig.uploadedAudioPreviewEnabled,
+    ),
+    clientTranscriptionEnabled: booleanOrDefault(
+      payload.client_transcription_enabled,
+      defaultClientConfig.clientTranscriptionEnabled,
+    ),
+    clientTranscriptionAutoStart: booleanOrDefault(
+      payload.client_transcription_auto_start,
+      defaultClientConfig.clientTranscriptionAutoStart,
+    ),
+    clientTranscriptionModel: modelOrDefault(
+      payload.client_transcription_model,
+    ),
+    clientTranscriptionQuantization: quantizationOrDefault(
+      payload.client_transcription_quantization,
+    ),
+    clientTranscriptionLanguage: languageOrDefault(
+      payload.client_transcription_language,
+    ),
+  };
+}
+
+export function loadClientConfig(
+  signal?: AbortSignal,
+): Promise<VoiceMessagesClientConfig> {
+  return fetch(
+    `${getSiteBasePath()}/plugins/ch.icorete.mattermost-voice-messages/api/v1/config`,
+    {
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { "X-Requested-With": "XMLHttpRequest" },
+      signal,
+    },
+  ).then(async (response) => {
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(body || "Could not load voice message settings");
+    }
+
+    return mapClientConfig(
+      (await response.json()) as ServerVoiceMessagesClientConfig,
+    );
+  });
+}
